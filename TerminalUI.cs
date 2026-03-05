@@ -49,13 +49,13 @@ internal static class TerminalUI
                 "VT Input Test - Raw ANSI Escape Sequences",
                 "",
                 "Try: Arrow keys, Function keys, Mouse, Ctrl+Z",
-                "'s' = toggle Stream/ReadFile, 'c' = clear, 'q' = quit"
+                "'s' = toggle Stream/ReadFile, 'z' = toggle signals, 'c' = clear, 'q' = quit"
             ]
             : [
                 "VT Input Test - Raw ANSI Escape Sequences",
                 "",
                 "Try: Arrow keys, Function keys, Mouse",
-                "'c' = clear, 'q' = quit"
+                "'z' = toggle signals (Ctrl+Z/Ctrl+C), 'c' = clear, 'q' = quit"
             ];
 
         for (var i = 0; i < instructions.Length; i++)
@@ -109,6 +109,28 @@ internal static class TerminalUI
     {
         Write(hOut, $"\x1b[{row};1H");
         Write(hOut, useStream ? "Read: Stream (Console.OpenStandardInput)" : "Read: ReadFile (P/Invoke)");
+    }
+
+    /// <summary>
+    /// Writes the initial signal mode label.
+    /// </summary>
+    internal static void DrawSignalLine(IntPtr hOut, int row, bool signalMode)
+    {
+        Write(hOut, $"\x1b[{row};1H");
+        Write(hOut, signalMode
+            ? "Signals: ON (Ctrl+Z=suspend, Ctrl+C=exit)"
+            : "Signals: OFF (Ctrl+Z/Ctrl+C appear as input)");
+    }
+
+    /// <summary>
+    /// Updates the signal mode label in the fixed header area.
+    /// </summary>
+    internal static void UpdateSignalLine(IntPtr hOut, int row, bool signalMode)
+    {
+        var label = signalMode
+            ? "Signals: ON (Ctrl+Z=suspend, Ctrl+C=exit)"
+            : "Signals: OFF (Ctrl+Z/Ctrl+C appear as input)";
+        Write(hOut, $"\x1b[s\x1b[{row};1H\x1b[2K{label}\x1b[u");
     }
 
     internal static void SetScrollRegion(IntPtr hOut, int top, int bottom)

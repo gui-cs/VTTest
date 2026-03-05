@@ -1,15 +1,30 @@
 # VTTest
 
-A cross-platform console application that displays raw ANSI/VT escape sequences as you type. Useful for understanding exactly what byte sequences your terminal sends for keyboard and mouse input.
+A cross-platform console application for exploring raw ANSI/VT escape sequences and investigating how stdin behaves differently across Windows and Unix platforms.
+
+## Why This Exists
+
+Terminal input is surprisingly inconsistent across platforms. On Windows, `ReadFile` and `Console.OpenStandardInput` behave differently (e.g., Ctrl+Z triggers an EOF on streams but not on `ReadFile`). On Unix, .NET's `Console.OpenStandardInput()` adds buffering that requires a newline before returning data, even with `stty raw` — so VTTest reads fd 0 directly to get true raw input. This tool makes all of that visible.
 
 ## What It Does
 
-VTTest puts the console into raw/VT input mode and reads input directly. On Windows it uses `ReadFile` (P/Invoke) or `Console.OpenStandardInput` (togglable); on Unix-like platforms it uses `stty raw` and streams. Every keypress, mouse click, or mouse move is displayed as:
+VTTest puts the console into raw/VT input mode and reads input directly. Every keypress, mouse click, or mouse move is displayed as:
 
 - A **human-readable interpretation** (e.g., `[Ctrl+A]`, `[Up]`, `[Alt+X]`, `[Mouse Left press @10,5]`)
 - The **raw hex bytes** of the escape sequence
 
-This makes it easy to see how your terminal encodes keys, modifiers, function keys, mouse events, and more.
+### Platform-Specific Behavior
+
+**Windows:**
+- Uses Win32 Console API via P/Invoke (`ReadFile`) or .NET streams (`Console.OpenStandardInput`)
+- Toggle between read methods with `s` to compare behavior (e.g., Ctrl+Z returns 0 bytes on streams but 0x1A via `ReadFile`)
+- Console mode flags (`ENABLE_VIRTUAL_TERMINAL_INPUT`, `ENABLE_PROCESSED_INPUT`) control how input is delivered
+
+**Unix (macOS/Linux):**
+- Uses `stty raw -echo -icanon` for raw terminal mode
+- Reads stdin fd 0 directly (not `Console.OpenStandardInput()`, which buffers line-by-line even in raw mode)
+- Signal handling (`isig`) can be toggled at runtime to test Ctrl+Z suspend/resume and Ctrl+C behavior
+- SIGCONT handler restores raw mode and redraws UI after `fg` resume
 
 ## Supported Input
 
@@ -23,7 +38,8 @@ This makes it easy to see how your terminal encodes keys, modifiers, function ke
 | Key | Action |
 |-----|--------|
 | `q` | Quit |
-| `s` | Toggle between `ReadFile` (P/Invoke) and `Stream` (Console.OpenStandardInput) read modes (Windows only) |
+| `s` | Toggle between `ReadFile` (P/Invoke) and `Stream` read modes (Windows only) |
+| `z` | Toggle signal handling — when ON, Ctrl+Z suspends and Ctrl+C exits; when OFF, they appear as raw input |
 | `c` | Clear the output area |
 
 ## Requirements
