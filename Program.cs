@@ -30,6 +30,10 @@ internal class Program
 
         if (s_isWindows)
         {
+            // Ensure console uses UTF-8 so box-drawing characters render correctly
+            // (VS Code debugger may launch with the system code page instead)
+            NativeConsole.SetConsoleOutputCP(NativeConsole.CP_UTF8);
+
             s_hIn = NativeConsole.GetStdHandle(NativeConsole.STD_INPUT_HANDLE);
             s_hOut = NativeConsole.GetStdHandle(NativeConsole.STD_OUTPUT_HANDLE);
 
@@ -84,15 +88,26 @@ internal class Program
         s_signalMode = false;
         TerminalUI.DrawSignalLine(s_hOut, signalRow, s_signalMode);
 
-        // Register SIGCONT handler for Unix suspend/resume
+        // Register signal handlers for Unix suspend/resume
+        PosixSignalRegistration? sigtstpReg = null;
         PosixSignalRegistration? sigcontReg = null;
 
         if (!s_isWindows)
         {
 #pragma warning disable CA1416 // Platform compatibility — guarded by s_isWindows check
+            // SIGTSTP: clean up terminal before suspend, then allow default (suspend)
+            sigtstpReg = PosixSignalRegistration.Create(PosixSignal.SIGTSTP, ctx =>
+            {
+                TerminalUI.DisableMouseTracking(s_hOut);
+                TerminalUI.ResetScrollRegion(s_hOut);
+                TerminalUI.Write(s_hOut, "\x1b[?25h"); // show cursor
+                TerminalUI.RunProcess("stty", "sane");
+                ctx.Cancel = false; // allow the actual suspend
+            });
+
+            // SIGCONT: restore terminal after fg resume
             sigcontReg = PosixSignalRegistration.Create(PosixSignal.SIGCONT, _ =>
             {
-#pragma warning restore CA1416
                 // Shell restored cooked mode; re-apply raw mode
                 if (s_signalMode)
                     TerminalUI.RunProcess("stty", "raw -echo -icanon isig min 1");
@@ -108,6 +123,7 @@ internal class Program
                 TerminalUI.DrawSignalLine(s_hOut, signalRow, s_signalMode);
                 TerminalUI.SetScrollRegion(s_hOut, s_scrollTop, s_height);
             });
+#pragma warning restore CA1416
         }
 
         // Set scroll region to rows below the header, leaving header fixed
@@ -203,6 +219,7 @@ internal class Program
         }
 
         stdinStream?.Dispose();
+        sigtstpReg?.Dispose();
         sigcontReg?.Dispose();
 
         // Cleanup

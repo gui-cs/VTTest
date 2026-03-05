@@ -77,4 +77,12 @@ internal static class NativeConsole
     internal static extern bool GetConsoleScreenBufferInfo(
         IntPtr hConsoleOutput,
         out CONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern bool SetConsoleOutputCP(uint wCodePageID);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern uint GetConsoleOutputCP();
+
+    internal const uint CP_UTF8 = 65001;
 }
