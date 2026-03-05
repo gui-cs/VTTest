@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using System.Text;
-using Microsoft.Win32.SafeHandles;
 
 namespace VTTest;
 
@@ -18,15 +17,17 @@ internal class Program
     private static bool s_signalMode;
     private static int s_statusRow;
     private static int s_methodRow;
-    private static bool s_useStream;
+    private static IInputReader s_reader = null!;
+    private static string? s_originalSttyState;
+    private static uint s_originalMode;
 
     private static void Main()
     {
         s_hIn = IntPtr.Zero;
         s_hOut = IntPtr.Zero;
-        uint originalMode = 0;
         s_mode = 0;
-        string? originalSttyState = null;
+        s_originalMode = 0;
+        s_originalSttyState = null;
 
         if (s_isWindows)
         {
@@ -43,14 +44,14 @@ internal class Program
                 return;
             }
 
-            if (!NativeConsole.GetConsoleMode(s_hIn, out originalMode))
+            if (!NativeConsole.GetConsoleMode(s_hIn, out s_originalMode))
             {
                 TerminalUI.Write(s_hOut, "Failed to get console mode\r\n");
                 return;
             }
 
             // Enable virtual terminal input and disable the processed modes
-            s_mode = originalMode;
+            s_mode = s_originalMode;
             s_mode |= NativeConsole.ENABLE_VIRTUAL_TERMINAL_INPUT | NativeConsole.ENABLE_MOUSE_INPUT;
             s_mode &= ~(NativeConsole.ENABLE_PROCESSED_INPUT | NativeConsole.ENABLE_LINE_INPUT |
                         NativeConsole.ENABLE_ECHO_INPUT | NativeConsole.ENABLE_QUICK_EDIT_MODE);
@@ -64,7 +65,7 @@ internal class Program
         else
         {
             // Unix: save stty state and set raw mode
-            originalSttyState = TerminalUI.RunProcess("stty", "-g");
+            s_originalSttyState = TerminalUI.RunProcess("stty", "-g");
             TerminalUI.RunProcess("stty", "raw -echo -icanon -isig min 1");
         }
 
@@ -77,11 +78,12 @@ internal class Program
         s_statusRow = TerminalUI.DrawHeader(s_hOut, s_width, s_isWindows);
         TerminalUI.DrawStatusLine(s_hOut, s_statusRow, s_mode, s_isWindows);
 
-        s_useStream = !s_isWindows;
-        Stream? stdinStream = null;
+        s_reader = s_isWindows
+            ? new NativeInputReader(s_hIn)
+            : new StreamInputReader(s_isWindows);
 
         s_methodRow = s_statusRow + 1;
-        TerminalUI.DrawMethodLine(s_hOut, s_methodRow, s_useStream);
+        TerminalUI.DrawMethodLine(s_hOut, s_methodRow, s_reader.DisplayName);
 
         // Signal mode line (row after method line)
         int signalRow = s_methodRow + 1;
@@ -91,12 +93,13 @@ internal class Program
         // Register SIGCONT handler for Unix suspend/resume
         PosixSignalRegistration? sigcontReg = null;
 
+        PosixSignalRegistration? sigintReg = null;
+
         if (!s_isWindows)
         {
 #pragma warning disable CA1416 // Platform compatibility — guarded by s_isWindows check
             sigcontReg = PosixSignalRegistration.Create(PosixSignal.SIGCONT, _ =>
             {
-#pragma warning restore CA1416
                 // Shell restored cooked mode; re-apply raw mode
                 if (s_signalMode)
                     TerminalUI.RunProcess("stty", "raw -echo -icanon isig min 1");
@@ -108,10 +111,18 @@ internal class Program
                 TerminalUI.ClearScreen(s_hOut);
                 s_statusRow = TerminalUI.DrawHeader(s_hOut, s_width, s_isWindows);
                 TerminalUI.DrawStatusLine(s_hOut, s_statusRow, s_mode, s_isWindows);
-                TerminalUI.DrawMethodLine(s_hOut, s_methodRow, s_useStream);
+                TerminalUI.DrawMethodLine(s_hOut, s_methodRow, s_reader.DisplayName);
                 TerminalUI.DrawSignalLine(s_hOut, signalRow, s_signalMode);
                 TerminalUI.SetScrollRegion(s_hOut, s_scrollTop, s_height);
             });
+
+            sigintReg = PosixSignalRegistration.Create(PosixSignal.SIGINT, ctx =>
+            {
+                ctx.Cancel = true; // Prevent default termination
+                Cleanup();
+                Environment.Exit(0);
+            });
+#pragma warning restore CA1416
         }
 
         // Set scroll region to rows below the header, leaving header fixed
@@ -122,58 +133,31 @@ internal class Program
 
         while (true)
         {
-            int bytesRead;
+            int bytesRead = s_reader.Read(buffer);
 
-            if (s_useStream)
+            if (bytesRead < 0)
+                break; // native read failed
+
+            if (bytesRead == 0)
             {
-                // Open raw fd 0 directly to bypass .NET's buffered console stream,
-                // which requires a newline before returning data on Unix.
-                stdinStream ??= s_isWindows
-                    ? Console.OpenStandardInput()
-                    : new FileStream(new SafeFileHandle((IntPtr)0, ownsHandle: false), FileAccess.Read, bufferSize: 1);
-                bytesRead = stdinStream.Read(buffer, 0, buffer.Length);
-
-                if (bytesRead == 0)
-                {
-                    TerminalUI.Write(s_hOut, "[Ctrl+Z] (Stream returned 0 bytes - Windows EOF bug)\r\n");
-                    continue;
-                }
-            }
-            else
-            {
-                if (!NativeConsole.ReadFile(s_hIn, buffer, (uint)buffer.Length, out uint nativeRead, IntPtr.Zero))
-                    break;
-
-                bytesRead = (int)nativeRead;
-
-                if (bytesRead == 0)
-                {
-                    TerminalUI.Write(s_hOut, "[Ctrl+Z] (ReadFile returned 0 bytes - Windows EOF bug)\r\n");
-                    continue;
-                }
+                TerminalUI.Write(s_hOut, s_reader.ZeroBytesMessage + "\r\n");
+                continue;
             }
 
-            var label = s_useStream ? "Strm" : "RdFl";
             var pretty = AnsiSequenceParser.FormatInput(buffer, bytesRead);
             var hex = AnsiSequenceParser.FormatRawHex(buffer, bytesRead);
-            TerminalUI.Write(s_hOut, $"{label}: {pretty}  \x1b[90m({hex})\x1b[0m\r\n");
+            TerminalUI.Write(s_hOut, $"{s_reader.Label}: {pretty}  \x1b[90m({hex})\x1b[0m\r\n");
 
             var chunk = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
             if (chunk.Contains('q'))
                 break;
 
-            if (chunk.Contains('s') && s_isWindows)
+            if (chunk.Contains('s'))
             {
-                s_useStream = !s_useStream;
-
-                if (!s_useStream)
-                {
-                    stdinStream?.Dispose();
-                    stdinStream = null;
-                }
-
-                TerminalUI.UpdateMethodLine(s_hOut, s_methodRow, s_useStream);
+                s_reader.Dispose();
+                s_reader = NextReader(s_reader);
+                TerminalUI.UpdateMethodLine(s_hOut, s_methodRow, s_reader.DisplayName);
             }
 
             if (chunk.Contains('z'))
@@ -206,20 +190,38 @@ internal class Program
                 TerminalUI.ClearScrollRegion(s_hOut, s_scrollTop);
         }
 
-        stdinStream?.Dispose();
+        sigintReg?.Dispose();
         sigcontReg?.Dispose();
+        Cleanup();
+    }
 
-        // Cleanup
+    /// <summary>
+    /// Cycles to the next input reader.
+    /// Windows: NativeInputReader → StreamInputReader → AsyncStreamInputReader → …
+    /// Unix:    StreamInputReader → AsyncStreamInputReader → …
+    /// </summary>
+    private static IInputReader NextReader(IInputReader current) => current switch
+    {
+        NativeInputReader => new StreamInputReader(s_isWindows),
+        StreamInputReader => new AsyncStreamInputReader(s_isWindows),
+        AsyncStreamInputReader when s_isWindows => new NativeInputReader(s_hIn),
+        _ => new StreamInputReader(s_isWindows),
+    };
+
+    private static void Cleanup()
+    {
+        s_reader.Dispose();
+
         TerminalUI.ResetScrollRegion(s_hOut);
         TerminalUI.DisableMouseTracking(s_hOut);
 
         if (s_isWindows)
         {
-            NativeConsole.SetConsoleMode(s_hIn, originalMode);
+            NativeConsole.SetConsoleMode(s_hIn, s_originalMode);
         }
-        else if (originalSttyState != null)
+        else if (s_originalSttyState != null)
         {
-            TerminalUI.RunProcess("stty", originalSttyState);
+            TerminalUI.RunProcess("stty", s_originalSttyState);
         }
 
         TerminalUI.Write(s_hOut, $"\x1b[{s_height};1H\r\nRestored console mode.\r\n");

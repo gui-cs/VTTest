@@ -49,13 +49,13 @@ internal static class TerminalUI
                 "VT Input Test - Raw ANSI Escape Sequences",
                 "",
                 "Try: Arrow keys, Function keys, Mouse, Ctrl+Z",
-                "'s' = toggle Stream/ReadFile, 'z' = toggle signals, 'c' = clear, 'q' = quit"
+                "'s' = cycle read mode, 'z' = toggle signals, 'c' = clear, 'q' = quit"
             ]
             : [
                 "VT Input Test - Raw ANSI Escape Sequences",
                 "",
                 "Try: Arrow keys, Function keys, Mouse",
-                "'z' = toggle signals (Ctrl+Z/Ctrl+C), 'c' = clear, 'q' = quit"
+                "'s' = cycle read mode, 'z' = toggle signals, 'c' = clear, 'q' = quit"
             ];
 
         for (var i = 0; i < instructions.Length; i++)
@@ -96,19 +96,18 @@ internal static class TerminalUI
     /// <summary>
     /// Updates the read-method label in the fixed header area.
     /// </summary>
-    internal static void UpdateMethodLine(IntPtr hOut, int row, bool useStream)
+    internal static void UpdateMethodLine(IntPtr hOut, int row, string displayName)
     {
-        var methodName = useStream ? "Stream (Console.OpenStandardInput)" : "ReadFile (P/Invoke)";
-        Write(hOut, $"\x1b[s\x1b[{row};1H\x1b[2KRead: {methodName}\x1b[u");
+        Write(hOut, $"\x1b[s\x1b[{row};1H\x1b[2KRead: {displayName}\x1b[u");
     }
 
     /// <summary>
     /// Writes the initial read-method label.
     /// </summary>
-    internal static void DrawMethodLine(IntPtr hOut, int row, bool useStream)
+    internal static void DrawMethodLine(IntPtr hOut, int row, string displayName)
     {
         Write(hOut, $"\x1b[{row};1H");
-        Write(hOut, useStream ? "Read: Stream (Console.OpenStandardInput)" : "Read: ReadFile (P/Invoke)");
+        Write(hOut, $"Read: {displayName}");
     }
 
     /// <summary>
