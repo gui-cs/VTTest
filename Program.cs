@@ -20,6 +20,53 @@ internal class Program
     private static int s_methodRow;
     private static bool s_useStream;
 
+    /// <summary>
+    /// Cleans up terminal state before suspend or exit (Unix).
+    /// </summary>
+    private static void CleanupTerminal()
+    {
+        TerminalUI.DisableMouseTracking(s_hOut);
+        TerminalUI.ResetScrollRegion(s_hOut);
+        TerminalUI.Write(s_hOut, "\x1b[?25h"); // show cursor
+        TerminalUI.RunProcess("stty", "sane");
+    }
+
+    /// <summary>
+    /// Restores terminal state after resume from suspend (Unix).
+    /// </summary>
+    private static void RestoreTerminal(int signalRow)
+    {
+        TerminalUI.RunProcess("stty", "raw -echo -icanon -isig min 1");
+        TerminalUI.EnableMouseTracking(s_hOut);
+        TerminalUI.ClearScreen(s_hOut);
+        s_statusRow = TerminalUI.DrawHeader(s_hOut, s_width, s_isWindows);
+        TerminalUI.DrawStatusLine(s_hOut, s_statusRow, s_mode, s_isWindows);
+        TerminalUI.DrawMethodLine(s_hOut, s_methodRow, s_useStream);
+        TerminalUI.DrawSignalLine(s_hOut, signalRow, s_signalMode);
+        TerminalUI.SetScrollRegion(s_hOut, s_scrollTop, s_height);
+    }
+
+    /// <summary>
+    /// Suspends the process by sending SIGTSTP to ourselves via kill.
+    /// We keep -isig (so we always see raw input bytes) and handle
+    /// suspend manually because .NET's SIGTSTP handling via
+    /// PosixSignalRegistration doesn't reliably suspend on macOS.
+    /// </summary>
+    private static void SuspendSelf(int signalRow)
+    {
+        CleanupTerminal();
+        TerminalUI.Write(s_hOut, $"\x1b[{s_height};1H\r\n");
+
+        // Send SIGTSTP to our own process group via kill shell command.
+        // Using "kill -TSTP 0" sends to the entire process group, which
+        // is what the terminal driver does when isig handles Ctrl+Z.
+        int pid = Environment.ProcessId;
+        TerminalUI.RunProcess("kill", $"-TSTP {pid}");
+
+        // We resume here after fg — restore terminal
+        RestoreTerminal(signalRow);
+    }
+
     private static void Main()
     {
         s_hIn = IntPtr.Zero;
@@ -63,7 +110,7 @@ internal class Program
         }
         else
         {
-            // Unix: save stty state and set raw mode
+            // Unix: save stty state and set raw mode (always -isig; we handle signals ourselves)
             originalSttyState = TerminalUI.RunProcess("stty", "-g");
             TerminalUI.RunProcess("stty", "raw -echo -icanon -isig min 1");
         }
@@ -87,44 +134,6 @@ internal class Program
         int signalRow = s_methodRow + 1;
         s_signalMode = false;
         TerminalUI.DrawSignalLine(s_hOut, signalRow, s_signalMode);
-
-        // Register signal handlers for Unix suspend/resume
-        PosixSignalRegistration? sigtstpReg = null;
-        PosixSignalRegistration? sigcontReg = null;
-
-        if (!s_isWindows)
-        {
-#pragma warning disable CA1416 // Platform compatibility — guarded by s_isWindows check
-            // SIGTSTP: clean up terminal before suspend, then allow default (suspend)
-            sigtstpReg = PosixSignalRegistration.Create(PosixSignal.SIGTSTP, ctx =>
-            {
-                TerminalUI.DisableMouseTracking(s_hOut);
-                TerminalUI.ResetScrollRegion(s_hOut);
-                TerminalUI.Write(s_hOut, "\x1b[?25h"); // show cursor
-                TerminalUI.RunProcess("stty", "sane");
-                ctx.Cancel = false; // allow the actual suspend
-            });
-
-            // SIGCONT: restore terminal after fg resume
-            sigcontReg = PosixSignalRegistration.Create(PosixSignal.SIGCONT, _ =>
-            {
-                // Shell restored cooked mode; re-apply raw mode
-                if (s_signalMode)
-                    TerminalUI.RunProcess("stty", "raw -echo -icanon isig min 1");
-                else
-                    TerminalUI.RunProcess("stty", "raw -echo -icanon -isig min 1");
-
-                // Re-enable mouse and redraw UI
-                TerminalUI.EnableMouseTracking(s_hOut);
-                TerminalUI.ClearScreen(s_hOut);
-                s_statusRow = TerminalUI.DrawHeader(s_hOut, s_width, s_isWindows);
-                TerminalUI.DrawStatusLine(s_hOut, s_statusRow, s_mode, s_isWindows);
-                TerminalUI.DrawMethodLine(s_hOut, s_methodRow, s_useStream);
-                TerminalUI.DrawSignalLine(s_hOut, signalRow, s_signalMode);
-                TerminalUI.SetScrollRegion(s_hOut, s_scrollTop, s_height);
-            });
-#pragma warning restore CA1416
-        }
 
         // Set scroll region to rows below the header, leaving header fixed
         s_scrollTop = signalRow + 2;
@@ -165,6 +174,28 @@ internal class Program
                 }
             }
 
+            // Check for signal-mode actions before displaying
+            // (on Unix, we always see raw bytes since -isig is always set)
+            if (s_signalMode && !s_isWindows)
+            {
+                // Ctrl+Z (0x1A) = suspend
+                for (int i = 0; i < bytesRead; i++)
+                {
+                    if (buffer[i] == 0x1A)
+                    {
+                        SuspendSelf(signalRow);
+                        goto nextRead; // terminal redrawn, skip displaying this input
+                    }
+                }
+
+                // Ctrl+C (0x03) = exit
+                for (int i = 0; i < bytesRead; i++)
+                {
+                    if (buffer[i] == 0x03)
+                        goto quit;
+                }
+            }
+
             var label = s_useStream ? "Strm" : "RdFl";
             var pretty = AnsiSequenceParser.FormatInput(buffer, bytesRead);
             var hex = AnsiSequenceParser.FormatRawHex(buffer, bytesRead);
@@ -192,15 +223,7 @@ internal class Program
             {
                 s_signalMode = !s_signalMode;
 
-                if (!s_isWindows)
-                {
-                    // Toggle isig: when on, kernel handles Ctrl+Z (SIGTSTP) and Ctrl+C (SIGINT)
-                    if (s_signalMode)
-                        TerminalUI.RunProcess("stty", "isig");
-                    else
-                        TerminalUI.RunProcess("stty", "-isig");
-                }
-                else
+                if (s_isWindows)
                 {
                     // Toggle ENABLE_PROCESSED_INPUT: when on, Windows handles Ctrl+C
                     if (s_signalMode)
@@ -216,11 +239,12 @@ internal class Program
 
             if (chunk.Contains('c'))
                 TerminalUI.ClearScrollRegion(s_hOut, s_scrollTop);
+
+            nextRead:;
         }
 
+        quit:
         stdinStream?.Dispose();
-        sigtstpReg?.Dispose();
-        sigcontReg?.Dispose();
 
         // Cleanup
         TerminalUI.ResetScrollRegion(s_hOut);
