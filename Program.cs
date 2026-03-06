@@ -61,6 +61,12 @@ internal class Program
                 TerminalUI.Write(s_hOut, "Failed to set console mode\r\n");
                 return;
             }
+
+            // Enable VT processing on stdout so ANSI escape sequences are interpreted
+            if (NativeConsole.GetConsoleMode(s_hOut, out uint outMode))
+            {
+                NativeConsole.SetConsoleMode(s_hOut, outMode | NativeConsole.ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
         }
         else
         {

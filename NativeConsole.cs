@@ -19,6 +19,9 @@ internal static class NativeConsole
     internal const uint ENABLE_AUTO_POSITION = 0x0100;
     internal const uint ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
 
+    // Console output mode flags
+    internal const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
+
     internal const int STD_INPUT_HANDLE = -10;
     internal const int STD_OUTPUT_HANDLE = -11;
 
